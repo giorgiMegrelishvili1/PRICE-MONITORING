@@ -1,26 +1,46 @@
-import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+"""
+ბავშვის პროდუქტების ფასების ინდექსი — PSP · Aversi · GEPHA/GPC
+გაშვება: streamlit run app.py
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
-import time
-import random
+import streamlit as st
+
+from config import (
+    AVERSI_LIST_URL,
+    COL_CATEGORY,
+    COL_NAME,
+    COL_OLD_PRICE,
+    COL_PRICE,
+    COL_SOURCE,
+    COL_UPDATED,
+    COL_URL,
+    GPC_LIST_URL,
+    MAX_PAGES_AVERSI,
+    MAX_PAGES_GPC,
+    MAX_PAGES_PSP,
+    PSP_CATEGORY_URL,
+)
+from scrapers import scrape_aversi, scrape_gpc, scrape_psp
+from scrapers.common import normalize_key
 
 st.set_page_config(
-    page_title="🍼 ბავშვის პროდუქტების ფასების ინდექსი",
+    page_title="ბავშვის პროდუქტების ფასების ინდექსი",
     page_icon="🍼",
-    layout="wide"
+    layout="wide",
 )
 
-# ============================================================
-# CUSTOM CSS
-# ============================================================
-st.markdown("""
+st.markdown(
+    """
 <style>
     .main { background-color: #f8f9ff; }
-    .stMetric { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.07); }
+    .stMetric { background: white; border-radius: 12px; padding: 16px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.07); }
     .source-badge {
         display: inline-block; padding: 4px 12px; border-radius: 20px;
         font-size: 13px; font-weight: 600; margin: 2px;
@@ -28,343 +48,238 @@ st.markdown("""
     .psp-badge { background: #e8f4fd; color: #1565c0; }
     .aversi-badge { background: #e8f5e9; color: #2e7d32; }
     .gepha-badge { background: #fff3e0; color: #e65100; }
-    h1 { color: #1a1a2e; }
-    .last-updated { color: #888; font-size: 12px; }
 </style>
-""", unsafe_allow_html=True)
-
-# ============================================================
-# SCRAPER FUNCTIONS
-# ============================================================
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ka-GE,ka;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
-
-CATEGORIES = {
-    "საფუჭვლეები": ["pampers", "huggies", "libero", "საფუჭველი", "diaper"],
-    "ბავშვის კვება": ["cerelac", "nutrilon", "nan", "similac", "porridge", "ფაფა", "ფორმულა"],
-    "ბავშვის კოსმეტიკა": ["johnson", "mustela", "chicco", "bubble", "shampoo", "შამპუნი"],
-    "სათამაშოები": ["toy", "სათამაშო", "lego", "puzzle"],
-}
+""",
+    unsafe_allow_html=True,
+)
 
 
-def scrape_psp(category_keywords: list[str]) -> list[dict]:
-    """Scrape PSP.ge for baby products."""
-    results = []
-    search_term = category_keywords[0]
-    url = f"https://psp.ge/ka/search?q={requests.utils.quote(search_term)}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+def load_all_data(
+    sources: list[str],
+    max_psp: int,
+    max_gpc: int,
+    max_aversi: int,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    rows: list[dict] = []
+    status: dict[str, str] = {}
+    progress = st.progress(0, text="მონაცემები იტვირთება...")
+    steps = len(sources)
+    step_i = 0
 
-        # PSP product cards — adjust selectors if site changes
-        cards = soup.select(".product-card, .product-item, [class*='product']")[:12]
-        for card in cards:
-            name_el = card.select_one("[class*='name'], [class*='title'], h3, h4")
-            price_el = card.select_one("[class*='price'], .price")
-            if name_el and price_el:
-                raw_price = price_el.get_text(strip=True).replace("₾", "").replace(",", ".").strip()
-                try:
-                    price = float(''.join(c for c in raw_price if c.isdigit() or c == '.'))
-                    results.append({
-                        "სახელი": name_el.get_text(strip=True)[:60],
-                        "ფასი (₾)": price,
-                        "წყარო": "PSP",
-                        "URL": url,
-                    })
-                except ValueError:
-                    pass
-    except Exception:
-        pass
-    return results
+    if "PSP" in sources:
+        progress.progress(step_i / max(steps, 1), text="PSP — GraphQL API...")
+        try:
+            rows.extend(scrape_psp(max_pages=max_psp))
+            status["PSP"] = "ok"
+        except Exception as exc:
+            status["PSP"] = str(exc)
+        step_i += 1
 
+    if "GEPHA/GPC" in sources:
+        progress.progress(step_i / max(steps, 1), text="GPC — კატალოგის გვერდები...")
+        try:
+            rows.extend(scrape_gpc(max_pages=max_gpc))
+            status["GEPHA/GPC"] = "ok"
+        except Exception as exc:
+            status["GEPHA/GPC"] = str(exc)
+        step_i += 1
 
-def scrape_aversi(category_keywords: list[str]) -> list[dict]:
-    """Scrape Aversi.ge for baby products."""
-    results = []
-    search_term = category_keywords[0]
-    url = f"https://aversi.ge/search?q={requests.utils.quote(search_term)}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+    if "Aversi" in sources:
+        progress.progress(step_i / max(steps, 1), text="Aversi — გვერდები (შეიძლება ნელი იყოს)...")
+        try:
+            rows.extend(scrape_aversi(max_pages=max_aversi))
+            status["Aversi"] = "ok"
+        except Exception as exc:
+            status["Aversi"] = str(exc)
+        step_i += 1
 
-        cards = soup.select(".product-card, .product-item, [class*='product']")[:12]
-        for card in cards:
-            name_el = card.select_one("[class*='name'], [class*='title'], h3, h4")
-            price_el = card.select_one("[class*='price']")
-            if name_el and price_el:
-                raw_price = price_el.get_text(strip=True).replace("₾", "").replace(",", ".").strip()
-                try:
-                    price = float(''.join(c for c in raw_price if c.isdigit() or c == '.'))
-                    results.append({
-                        "სახელი": name_el.get_text(strip=True)[:60],
-                        "ფასი (₾)": price,
-                        "წყარო": "Aversi",
-                        "URL": url,
-                    })
-                except ValueError:
-                    pass
-    except Exception:
-        pass
-    return results
+    progress.empty()
+
+    if not rows:
+        return pd.DataFrame(), status
+
+    df = pd.DataFrame(rows)
+    df["შედარების გასაღები"] = df[COL_NAME].map(normalize_key)
+    df[COL_UPDATED] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return df, status
 
 
-def scrape_gepha(category_keywords: list[str]) -> list[dict]:
-    """Scrape GEPHA (GPC) for baby products."""
-    results = []
-    search_term = category_keywords[0]
-    url = f"https://www.gpc.ge/ka/search?keyword={requests.utils.quote(search_term)}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        cards = soup.select(".product-card, .product-item, [class*='product']")[:12]
-        for card in cards:
-            name_el = card.select_one("[class*='name'], [class*='title'], h3, h4")
-            price_el = card.select_one("[class*='price']")
-            if name_el and price_el:
-                raw_price = price_el.get_text(strip=True).replace("₾", "").replace(",", ".").strip()
-                try:
-                    price = float(''.join(c for c in raw_price if c.isdigit() or c == '.'))
-                    results.append({
-                        "სახელი": name_el.get_text(strip=True)[:60],
-                        "ფასი (₾)": price,
-                        "წყარო": "GEPHA/GPC",
-                        "URL": url,
-                    })
-                except ValueError:
-                    pass
-    except Exception:
-        pass
-    return results
-
-
-# ============================================================
-# DEMO DATA FALLBACK (when scraping blocked / JS-only pages)
-# ============================================================
-DEMO_DATA = {
-    "საფუჭვლეები": [
-        {"სახელი": "Pampers Active Baby N4 (46ც)", "ფასი (₾)": 28.50, "წყარო": "PSP"},
-        {"სახელი": "Pampers Active Baby N4 (46ც)", "ფასი (₾)": 29.90, "წყარო": "Aversi"},
-        {"სახელი": "Pampers Active Baby N4 (46ც)", "ფასი (₾)": 27.80, "წყარო": "GEPHA/GPC"},
-        {"სახელი": "Huggies Classic N4 (50ც)", "ფასი (₾)": 25.00, "წყარო": "PSP"},
-        {"სახელი": "Huggies Classic N4 (50ც)", "ფასი (₾)": 24.50, "წყარო": "Aversi"},
-        {"სახელი": "Huggies Classic N4 (50ც)", "ფასი (₾)": 25.50, "წყარო": "GEPHA/GPC"},
-        {"სახელი": "Libero Comfort N3 (52ც)", "ფასი (₾)": 22.90, "წყარო": "PSP"},
-        {"სახელი": "Libero Comfort N3 (52ც)", "ფასი (₾)": 23.40, "წყარო": "Aversi"},
-    ],
-    "ბავშვის კვება": [
-        {"სახელი": "Nutrilon Premium 1 (400გ)", "ფასი (₾)": 45.00, "წყარო": "PSP"},
-        {"სახელი": "Nutrilon Premium 1 (400გ)", "ფასი (₾)": 46.50, "წყარო": "Aversi"},
-        {"სახელი": "Nutrilon Premium 1 (400გ)", "ფასი (₾)": 44.00, "წყარო": "GEPHA/GPC"},
-        {"სახელი": "NAN Optipro 2 (800გ)", "ფასი (₾)": 62.00, "წყარო": "PSP"},
-        {"სახელი": "NAN Optipro 2 (800გ)", "ფასი (₾)": 63.50, "წყარო": "Aversi"},
-        {"სახელი": "Cerelac ბრინჯი (250გ)", "ფასი (₾)": 14.90, "წყარო": "PSP"},
-        {"სახელი": "Cerelac ბრინჯი (250გ)", "ფასი (₾)": 15.20, "წყარო": "Aversi"},
-        {"სახელი": "Cerelac ბრინჯი (250გ)", "ფასი (₾)": 14.50, "წყარო": "GEPHA/GPC"},
-    ],
-    "ბავშვის კოსმეტიკა": [
-        {"სახელი": "Johnson's Baby შამპუნი (200მლ)", "ფასი (₾)": 12.50, "წყარო": "PSP"},
-        {"სახელი": "Johnson's Baby შამპუნი (200მლ)", "ფასი (₾)": 13.00, "წყარო": "Aversi"},
-        {"სახელი": "Johnson's Baby შამპუნი (200მლ)", "ფასი (₾)": 12.00, "წყარო": "GEPHA/GPC"},
-        {"სახელი": "Mustela Bebe კრემი (50მლ)", "ფასი (₾)": 28.00, "წყარო": "PSP"},
-        {"სახელი": "Mustela Bebe კრემი (50მლ)", "ფასი (₾)": 29.50, "წყარო": "Aversi"},
-        {"სახელი": "Chicco ბუშტის აბაზანა (500მლ)", "ფასი (₾)": 18.90, "წყარო": "PSP"},
-        {"სახელი": "Chicco ბუშტის აბაზანა (500მლ)", "ფასი (₾)": 19.50, "წყარო": "Aversi"},
-    ],
-}
-
-
-@st.cache_data(ttl=300)  # cache 5 min
-def load_data(use_demo: bool) -> tuple[pd.DataFrame, bool]:
-    all_rows = []
-    is_demo = use_demo
-
-    if not use_demo:
-        progress = st.progress(0, text="PSP-ს სკანირება...")
-        for i, (cat, keywords) in enumerate(CATEGORIES.items()):
-            progress.progress((i * 3) / (len(CATEGORIES) * 3), text=f"PSP — {cat}")
-            all_rows.extend(scrape_psp(keywords))
-            time.sleep(random.uniform(0.5, 1.2))
-
-            progress.progress((i * 3 + 1) / (len(CATEGORIES) * 3), text=f"Aversi — {cat}")
-            all_rows.extend(scrape_aversi(keywords))
-            time.sleep(random.uniform(0.5, 1.2))
-
-            progress.progress((i * 3 + 2) / (len(CATEGORIES) * 3), text=f"GEPHA — {cat}")
-            all_rows.extend(scrape_gepha(keywords))
-            time.sleep(random.uniform(0.5, 1.2))
-
-        progress.empty()
-
-        if len(all_rows) < 5:
-            is_demo = True
-
-    if is_demo:
-        for cat, rows in DEMO_DATA.items():
-            for r in rows:
-                all_rows.append({**r, "კატეგორია": cat})
-
-    df = pd.DataFrame(all_rows)
-    if "კატეგორია" not in df.columns:
-        df["კატეგორია"] = "სხვა"
-    df["განახლდა"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return df, is_demo
-
-
-# ============================================================
-# UI
-# ============================================================
+# —— UI ——
 st.title("🍼 ბავშვის პროდუქტების ფასების ინდექსი")
-st.markdown("**PSP · Aversi · GEPHA** — ფასების შედარება რეალურ დროში")
+st.markdown("**PSP · Aversi · GEPHA/GPC** — ფასების შედარება (განახლება ყოველ გახსნაზე)")
 
-# Sidebar
 with st.sidebar:
     st.header("⚙️ პარამეტრები")
-    use_demo = st.toggle("🎭 Demo მონაცემები (სწრაფი ნახვა)", value=True)
-    st.caption("გამორთე რეალური სქრეიფინგისთვის — შეიძლება ნელა იმუშაოს")
+    st.caption("რეალური სქრეიფინგი — პირველი ჩატვირთვა შეიძლება 1–5 წუთი გრძელდეს.")
+
+    sources = st.multiselect(
+        "წყაროები",
+        ["PSP", "Aversi", "GEPHA/GPC"],
+        default=["PSP", "Aversi", "GEPHA/GPC"],
+    )
     st.divider()
-    st.markdown("**წყაროები:**")
-    st.markdown('<span class="source-badge psp-badge">PSP</span>', unsafe_allow_html=True)
-    st.markdown('<span class="source-badge aversi-badge">Aversi</span>', unsafe_allow_html=True)
-    st.markdown('<span class="source-badge gepha-badge">GEPHA/GPC</span>', unsafe_allow_html=True)
+    st.subheader("პაგინაციის ლიმიტი")
+    max_psp = st.slider("PSP მაქს. გვერდი", 1, MAX_PAGES_PSP, min(15, MAX_PAGES_PSP))
+    max_gpc = st.slider("GPC მაქს. გვერდი", 1, MAX_PAGES_GPC, 5)
+    max_aversi = st.slider("Aversi მაქს. გვერდი", 1, MAX_PAGES_AVERSI, min(10, MAX_PAGES_AVERSI))
+
     st.divider()
-    if st.button("🔄 განახლება", use_container_width=True):
-        st.cache_data.clear()
+    st.markdown("**კატალოგის ბმულები:**")
+    st.markdown(f"[PSP]({PSP_CATEGORY_URL})")
+    st.markdown(f"[GPC]({GPC_LIST_URL})")
+    st.markdown(f"[Aversi]({AVERSI_LIST_URL})")
+
+    st.divider()
+    st.markdown(
+        '<span class="source-badge psp-badge">PSP</span> '
+        '<span class="source-badge aversi-badge">Aversi</span> '
+        '<span class="source-badge gepha-badge">GEPHA/GPC</span>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button("🔄 თავიდან ჩატვირთვა", use_container_width=True):
         st.rerun()
 
-# Load
-with st.spinner("მონაცემები იტვირთება..."):
-    df, is_demo = load_data(use_demo)
+if not sources:
+    st.warning("აირჩიეთ მინიმუმ ერთი წყარო.")
+    st.stop()
 
-if is_demo and not use_demo:
-    st.warning("⚠️ სკრეიფინგი ვერ მოხერხდა (JS-rendered ან დაბლოკილი). ნაჩვენებია Demo მონაცემები.")
-elif is_demo:
-    st.info("🎭 Demo მონაცემები — რეალური სქრეიფინგისთვის გამორთე toggle.")
+with st.spinner("მონაცემები იკრიბება საიტებიდან..."):
+    df, status = load_all_data(sources, max_psp, max_gpc, max_aversi)
 
-st.caption(f"🕐 განახლდა: {df['განახლდა'].iloc[0] if len(df) > 0 else '—'}")
+for src, msg in status.items():
+    if msg == "ok":
+        n = len(df[df[COL_SOURCE] == src]) if len(df) else 0
+        st.success(f"✅ {src}: {n} პროდუქტი")
+    else:
+        st.error(f"❌ {src}: {msg}")
+
+if df.empty:
+    st.stop()
+
+st.caption(f"🕐 განახლდა: {df[COL_UPDATED].iloc[0]}")
 st.divider()
 
-# ---- KPI ----
-col1, col2, col3, col4 = st.columns(4)
-with col1:
+# KPI
+c1, c2, c3, c4 = st.columns(4)
+with c1:
     st.metric("📦 პროდუქტი სულ", len(df))
-with col2:
-    st.metric("🏪 წყარო", df["წყარო"].nunique())
-with col3:
-    st.metric("💰 საშ. ფასი", f"₾{df['ფასი (₾)'].mean():.2f}")
-with col4:
-    cheapest = df.loc[df["ფასი (₾)"].idxmin(), "წყარო"] if len(df) > 0 else "—"
-    st.metric("🏆 იაფი წყარო", cheapest)
+with c2:
+    st.metric("🏪 წყარო", df[COL_SOURCE].nunique())
+with c3:
+    st.metric("💰 საშ. ფასი", f"₾{df[COL_PRICE].mean():.2f}")
+with c4:
+    cheapest_src = df.loc[df[COL_PRICE].idxmin(), COL_SOURCE]
+    st.metric("🏆 ყველაზე იაფი (ერთეული)", cheapest_src)
 
 st.divider()
 
-# ---- CATEGORY FILTER ----
-categories = ["ყველა"] + sorted(df["კატეგორია"].unique().tolist())
-selected_cat = st.selectbox("📂 კატეგორია", categories)
+# ფილტრები
+fc1, fc2 = st.columns(2)
+with fc1:
+    src_filter = st.multiselect(
+        "წყარო",
+        sorted(df[COL_SOURCE].unique()),
+        default=sorted(df[COL_SOURCE].unique()),
+    )
+with fc2:
+    price_range = st.slider(
+        "ფასის დიაპაზონი (₾)",
+        float(df[COL_PRICE].min()),
+        float(df[COL_PRICE].max()),
+        (float(df[COL_PRICE].min()), float(df[COL_PRICE].max())),
+    )
 
-filtered = df if selected_cat == "ყველა" else df[df["კატეგორია"] == selected_cat]
+search = st.text_input("🔍 ძიება სახელით", "")
+filtered = df[
+    df[COL_SOURCE].isin(src_filter)
+    & df[COL_PRICE].between(price_range[0], price_range[1])
+]
+if search.strip():
+    filtered = filtered[filtered[COL_NAME].str.contains(search.strip(), case=False, na=False)]
 
-# ---- CHARTS ----
-tab1, tab2, tab3 = st.tabs(["📊 საშუალო ფასი წყაროს მიხედვით", "📈 ფასების სპექტრი", "📋 სრული ცხრილი"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["📊 საშუალო ფასი", "📈 განაწილება", "📋 ცხრილი", "💡 შედარება"]
+)
 
 with tab1:
-    avg_by_source_cat = (
-        filtered.groupby(["კატეგორია", "წყარო"])["ფასი (₾)"]
-        .mean()
+    avg = (
+        filtered.groupby([COL_SOURCE])[COL_PRICE]
+        .agg(["mean", "median", "count"])
         .reset_index()
-        .rename(columns={"ფასი (₾)": "საშ. ფასი (₾)"})
     )
+    avg.columns = [COL_SOURCE, "საშუალო", "მედიანა", "რაოდენობა"]
     fig = px.bar(
-        avg_by_source_cat,
-        x="კატეგორია",
-        y="საშ. ფასი (₾)",
-        color="წყარო",
-        barmode="group",
-        color_discrete_map={"PSP": "#1565c0", "Aversi": "#2e7d32", "GEPHA/GPC": "#e65100"},
-        title="კატეგორიების საშუალო ფასი წყაროს მიხედვით",
-        text_auto=".1f",
+        avg,
+        x=COL_SOURCE,
+        y="საშუალო",
+        color=COL_SOURCE,
+        text_auto=".2f",
+        title="საშუალო ფასი წყაროს მიხედვით (ბავშვის კვება)",
+        color_discrete_map={
+            "PSP": "#1565c0",
+            "Aversi": "#2e7d32",
+            "GEPHA/GPC": "#e65100",
+        },
     )
-    fig.update_layout(
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        font_family="Arial",
-        yaxis_title="ფასი (₾)",
-        legend_title="წყარო",
-        height=420,
-    )
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white", height=420)
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     fig2 = px.box(
         filtered,
-        x="წყარო",
-        y="ფასი (₾)",
-        color="წყარო",
-        facet_col="კატეგორია",
-        color_discrete_map={"PSP": "#1565c0", "Aversi": "#2e7d32", "GEPHA/GPC": "#e65100"},
-        title="ფასების განაწილება კატეგორიისა და წყაროს მიხედვით",
-        points="all",
+        x=COL_SOURCE,
+        y=COL_PRICE,
+        color=COL_SOURCE,
+        points="outliers",
+        title="ფასების განაწილება",
+        color_discrete_map={
+            "PSP": "#1565c0",
+            "Aversi": "#2e7d32",
+            "GEPHA/GPC": "#e65100",
+        },
     )
-    fig2.update_layout(
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        height=450,
-        showlegend=False,
-    )
+    fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white", height=450, showlegend=False)
     st.plotly_chart(fig2, use_container_width=True)
 
 with tab3:
+    show_cols = [COL_NAME, COL_PRICE, COL_SOURCE, COL_URL]
+    if COL_OLD_PRICE in filtered.columns:
+        show_cols.insert(2, COL_OLD_PRICE)
     st.dataframe(
-        filtered[["სახელი", "კატეგორია", "ფასი (₾)", "წყარო"]]
-        .sort_values("ფასი (₾)")
-        .reset_index(drop=True),
+        filtered[show_cols].sort_values(COL_PRICE).reset_index(drop=True),
         use_container_width=True,
-        height=400,
+        height=450,
+        column_config={COL_URL: st.column_config.LinkColumn("ბმული")},
     )
-    csv = filtered.to_csv(index=False, encoding="utf-8-sig")
     st.download_button(
-        "⬇️ CSV-ის ჩამოტვირთვა",
-        data=csv,
+        "⬇️ CSV",
+        filtered.to_csv(index=False, encoding="utf-8-sig"),
         file_name="baby_price_index.csv",
         mime="text/csv",
     )
 
-# ---- PRICE DIFF TABLE ----
-st.divider()
-st.subheader("💡 ფასების სხვაობა წყაროებს შორის")
-
-pivot = (
-    filtered.groupby(["სახელი", "წყარო"])["ფასი (₾)"]
-    .mean()
-    .unstack("წყარო")
-    .reset_index()
-    .dropna(thresh=2)
-)
-if len(pivot) > 0:
-    price_cols = [c for c in ["PSP", "Aversi", "GEPHA/GPC"] if c in pivot.columns]
-    if len(price_cols) >= 2:
-        pivot["მაქს-მინ სხვაობა (₾)"] = pivot[price_cols].max(axis=1) - pivot[price_cols].min(axis=1)
-        pivot["იაფი წყარო"] = pivot[price_cols].idxmin(axis=1)
-        pivot = pivot.sort_values("მაქს-მინ სხვაობა (₾)", ascending=False).head(15)
-
-        st.dataframe(
-            pivot.style.format({c: "₾{:.2f}" for c in price_cols if c in pivot.columns}
-                               | {"მაქს-მინ სხვაობა (₾)": "₾{:.2f}"}),
-            use_container_width=True,
-            height=350,
-        )
+with tab4:
+    st.caption(
+        "შედარება ხდება ნორმალიზებული სახელის მიხედვით. "
+        "სრულად იდენტური პროდუქტები სამივე მაღაზიაში იშვიათია — "
+        "გამოიყენეთ SKU/ბმული დასაზუსტებლად."
+    )
+    pivot = (
+        filtered.groupby(["შედარების გასაღები", COL_SOURCE])[COL_PRICE]
+        .min()
+        .unstack(COL_SOURCE)
+        .reset_index()
+    )
+    avail = [c for c in ["PSP", "Aversi", "GEPHA/GPC"] if c in pivot.columns]
+    if len(avail) >= 2:
+        pivot["მაქს-მინ სხვაობა (₾)"] = pivot[avail].max(axis=1) - pivot[avail].min(axis=1)
+        pivot["იაპი წყარო"] = pivot[avail].idxmin(axis=1)
+        name_map = filtered.drop_duplicates("შედარების გასაღები").set_index("შედარების გასაღები")[COL_NAME]
+        pivot[COL_NAME] = pivot["შედარების გასაღები"].map(name_map)
+        show = [COL_NAME] + avail + ["მაქს-მინ სხვაობა (₾)", "იაპი წყარო"]
+        pivot = pivot[show].sort_values("მაქს-მინ სხვაობა (₾)", ascending=False).head(30)
+        fmt = {c: "₾{:.2f}" for c in avail + ["მაქს-მინ სხვაობა (₾)"]}
+        st.dataframe(pivot.style.format(fmt), use_container_width=True, height=400)
     else:
-        st.info("შედარებისთვის საჭიროა მინიმუმ 2 წყაროს მონაცემები.")
-else:
-    st.info("შედარებისთვის საკმარისი მონაცემი არ არის.")
+        st.info("შედარებისთვის საჭიროა მინიმუმ 2 წყარო ერთი და იგივე გასაღებით.")
