@@ -26,9 +26,6 @@ from config import (
     MAX_PAGES_PSP,
     PSP_CATEGORY_URL,
 )
-from scrapers import scrape_aversi, scrape_gpc, scrape_psp
-from scrapers.common import normalize_key
-
 st.set_page_config(
     page_title="ბავშვის პროდუქტების ფასების ინდექსი",
     page_icon="🍼",
@@ -52,6 +49,20 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+try:
+    from scrapers import scrape_aversi, scrape_gpc, scrape_psp
+    from scrapers.common import normalize_key
+except Exception as _import_err:
+    st.error("პროგრამის ფაილები ვერ ჩაიტვირთა (scrapers/config).")
+    st.code(str(_import_err))
+    st.info(
+        "გადაწყვეტა:\n"
+        "1. გახსენით საქაღალდე `baby-price-index`\n"
+        "2. გაუშვით `setup.bat`\n"
+        "3. გაუშვით `run.bat` (არა ორმაგი დაწკაპუნება app.py-ზე)"
+    )
+    st.stop()
 
 
 def load_all_data(
@@ -106,55 +117,86 @@ def load_all_data(
 
 # —— UI ——
 st.title("🍼 ბავშვის პროდუქტების ფასების ინდექსი")
-st.markdown("**PSP · Aversi · GEPHA/GPC** — ფასების შედარება (განახლება ყოველ გახსნაზე)")
+st.markdown("**PSP · Aversi · GEPHA/GPC**")
+
+if "df" not in st.session_state:
+    st.session_state.df = None
+    st.session_state.status = {}
+    st.session_state.loaded = False
 
 with st.sidebar:
     st.header("⚙️ პარამეტრები")
-    st.caption("რეალური სქრეიფინგი — პირველი ჩატვირთვა შეიძლება 1–5 წუთი გრძელდეს.")
+    st.caption("ჯერ დააჭირეთ «მონაცემების ჩატვირთვა» — მაშინ დაიწყება სკანირება.")
 
     sources = st.multiselect(
         "წყაროები",
         ["PSP", "Aversi", "GEPHA/GPC"],
-        default=["PSP", "Aversi", "GEPHA/GPC"],
+        default=["PSP", "GEPHA/GPC"],
     )
     st.divider()
     st.subheader("პაგინაციის ლიმიტი")
-    max_psp = st.slider("PSP მაქს. გვერდი", 1, MAX_PAGES_PSP, min(15, MAX_PAGES_PSP))
-    max_gpc = st.slider("GPC მაქს. გვერდი", 1, MAX_PAGES_GPC, 5)
-    max_aversi = st.slider("Aversi მაქს. გვერდი", 1, MAX_PAGES_AVERSI, min(10, MAX_PAGES_AVERSI))
+    max_psp = st.slider("PSP მაქს. გვერდი", 1, MAX_PAGES_PSP, 3)
+    max_gpc = st.slider("GPC მაქს. გვერდი", 1, MAX_PAGES_GPC, 2)
+    max_aversi = st.slider("Aversi მაქს. გვერდი", 1, MAX_PAGES_AVERSI, 2)
 
     st.divider()
-    st.markdown("**კატალოგის ბმულები:**")
+    load_clicked = st.button("📥 მონაცემების ჩატვირთვა", type="primary", use_container_width=True)
+    if st.button("🔄 გასუფთავება", use_container_width=True):
+        st.session_state.df = None
+        st.session_state.status = {}
+        st.session_state.loaded = False
+        st.rerun()
+
+    st.divider()
+    st.markdown("**ბმულები:**")
     st.markdown(f"[PSP]({PSP_CATEGORY_URL})")
     st.markdown(f"[GPC]({GPC_LIST_URL})")
     st.markdown(f"[Aversi]({AVERSI_LIST_URL})")
 
-    st.divider()
-    st.markdown(
-        '<span class="source-badge psp-badge">PSP</span> '
-        '<span class="source-badge aversi-badge">Aversi</span> '
-        '<span class="source-badge gepha-badge">GEPHA/GPC</span>',
-        unsafe_allow_html=True,
+if load_clicked and sources:
+    with st.spinner("მონაცემები იკრიბება — არ დახუროთ ბრაუზერი..."):
+        df_new, status_new = load_all_data(sources, max_psp, max_gpc, max_aversi)
+    st.session_state.df = df_new
+    st.session_state.status = status_new
+    st.session_state.loaded = True
+    st.rerun()
+
+if not st.session_state.loaded:
+    st.info(
+        "👋 აპლიკაცია მუშაობს.\n\n"
+        "**რა უნდა გააკეთოთ:**\n"
+        "1. მარცხნივ აირჩიეთ წყაროები\n"
+        "2. დააჭირეთ **«მონაცემების ჩატვირთვა»**\n"
+        "3. დაელოდეთ 30 წამიდან 5 წუთამდე (Aversi ყველაზე ნელია)\n\n"
+        "თუ ეკრანი ცარიელია — გახსენით: http://localhost:8501"
     )
-
-    if st.button("🔄 თავიდან ჩატვირთვა", use_container_width=True):
-        st.rerun()
-
-if not sources:
-    st.warning("აირჩიეთ მინიმუმ ერთი წყარო.")
+    with st.expander("❓ ხშირი პრობლემები"):
+        st.markdown(
+            """
+- **`streamlit` არ მოიძებნება** → გაუშვით `setup.bat`, შემდეგ `run.bat`
+- **არა `app.py` ორმაცი დაწკაპუნება** → მხოლოდ `run.bat`
+- **Aversi ვერ მუშაობს** → გამორთეთ Aversi ან: `playwright install chromium`
+- **ყველაფერი ❌** → შეამოწმეთ ინტერნეტი; ტესტისთვის მხოლოდ PSP + 2 გვერდი
+            """
+        )
+    if not sources:
+        st.warning("აირჩიეთ მინიმუმ ერთი წყარო, შემდეგ «მონაცემების ჩატვირთვა».")
     st.stop()
 
-with st.spinner("მონაცემები იკრიბება საიტებიდან..."):
-    df, status = load_all_data(sources, max_psp, max_gpc, max_aversi)
+df = st.session_state.df
+status = st.session_state.status
 
 for src, msg in status.items():
     if msg == "ok":
-        n = len(df[df[COL_SOURCE] == src]) if len(df) else 0
+        n = len(df[df[COL_SOURCE] == src]) if df is not None and len(df) else 0
         st.success(f"✅ {src}: {n} პროდუქტი")
     else:
         st.error(f"❌ {src}: {msg}")
 
-if df.empty:
+if df is None or df.empty:
+    st.error(
+        "მონაცემი ვერ მოიძებნა. სცადეთ მხოლოდ **PSP** (2–3 გვერდი) ან გაზარდეთ გვერდების რაოდენობა."
+    )
     st.stop()
 
 st.caption(f"🕐 განახლდა: {df[COL_UPDATED].iloc[0]}")
